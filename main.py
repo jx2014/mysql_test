@@ -7,7 +7,9 @@ import mysql.connector
 import _mysql_connector
 import time
 import pandas as pd
+import matplotlib.pyplot as plt
 
+plt.style.use('ggplot')
 
 
 
@@ -60,11 +62,14 @@ def upload_main_table(excel_file_path, sheet_name):
                     receive_date    datetime    NOT NULL,
                     fault_report    text   NOT NULL);
                     """
+    # need to upload new table every time we have a new service report.
     try:
         database.query("""DROP TABLE main_table;""")
-    except _mysql_connector.MySQLInterfaceError:
-        pass
-    database.query(create_table)
+    except _mysql_connector.MySQLInterfaceError as e:
+        print e
+    finally:
+        database.query(create_table)
+    # upload cell values one by one.
     query = """INSERT INTO main_table (rma, macid, customer, prod_type, receive_date, fault_report)
             VALUES ('%s', '%s', '%s', '%s', '%s', '%s');"""
     for r in range(1, sheet.nrows):
@@ -78,6 +83,7 @@ def upload_main_table(excel_file_path, sheet_name):
         fault_report = sheet.cell(r, col_to_num('F')).value
         values = (rma, macid, customer, prod_type, receive_date, fault_report)
         database.query(query % values)
+    # consolidate the product names
     database.query("""ALTER TABLE main_table ADD prod_type_corrected VARCHAR(30);""")
     database.query("""SET SQL_SAFE_UPDATES = 0;""")
     database.query("""UPDATE main_table
@@ -90,37 +96,92 @@ def upload_main_table(excel_file_path, sheet_name):
                       SET prod_type_corrected = 'printer 2.0' 
                       WHERE prod_type LIKE '%printer%' AND prod_type LIKE '%2.0%';""")
 
-def update_recv_date_table(excel_file_path, sheet_name):
+
+def update_ship_date_table(excel_file_path, sheet_name):
     book = xlrd.open_workbook(excel_file_path)
     sheet = book.sheet_by_name(sheet_name)
-    #database.query("""SHOW TABLES LIKE 'recv_date_table';""")
+    create_table = """CREATE TABLE ship_date_table 
+                        (macid   char(16)    NOT NULL,
+                        ship_date   datetime    NOT NULL);
+                        """
+    try:
+        database.query("""SELECT * FROM ship_date_table LIMIT 5""")
+        database.consume_result()
+    except _mysql_connector.MySQLInterfaceError as e:
+        print e
+        database.query(create_table)
+    query = """INSERT INTO ship_date_table (macid, ship_date)
+            VALUES ('%s', '%s');"""
+    for r in range(1, sheet.nrows):
+        macid = sheet.cell(r, col_to_num('A')).value
+        ship_date = time.strftime('%Y/%m/%d',
+                                     time.localtime((sheet.cell(r, col_to_num('B')).value - 25568) * 86400))
+        values = (macid, ship_date)
+        database.query(query % values)
 
+
+
+def upload_total_shippment_table(excel_file_path, sheet_name):
+    book = xlrd.open_workbook(excel_file_path)
+    sheet = book.sheet_by_name(sheet_name)
+    create_table = """CREATE TABLE total_shipment_table 
+                    (prod_type   char(16)    NOT NULL,
+                    ship_year    int    NOT NULL,                    
+                    ship_qty    int NOT NULL);
+                    """
+    # need to upload new table every time we have a new service report.
+    try:
+        database.query("""DROP TABLE total_shipment_table;""")
+    except _mysql_connector.MySQLInterfaceError as e:
+        print e
+    finally:
+        database.query(create_table)
+    # upload cell values one by one.
+    query = """INSERT INTO total_shipment_table (prod_type, ship_year, ship_qty)
+                VALUES ('%s', '%s', '%s');"""
+    for r in range(1, sheet.nrows):
+        prod_type = sheet.cell(r, col_to_num('A')).value
+        ship_year = sheet.cell(r, col_to_num('B')).value
+        ship_qty = sheet.cell(r, col_to_num('C')).value
+        values = (prod_type, ship_year, ship_qty)
+        database.query(query % values)
+
+def query_DOM(product_name):
+    query_DOM = """SELECT DATE_FORMAT(receive_date, "%Y") as Ship_Years, COUNT(*) as Counts FROM main_table WHERE main_table.prod_type_corrected='%s' GROUP BY DATE_FORMAT(receive_date, "%Y");""" % product_name
 
 if __name__ == "__main__":
-    main_spreadsheet = r"test_data/main_spreadsheet.xlsx"
-    main_worksheet = "Sheet1"
-
-    recv_date_spreadsheet = r"test_data/main_spreadsheet.xlsx"
-    recv_date_worksheet = "Sheet1"
-
-
+    # connect to database using c API
     database = _mysql_connector.MySQL()
     database.connect(host='localhost', user='root', password='NewPass123!', database='mysqlPython')
 
-    upload_main_table(main_spreadsheet, main_worksheet)
-    update_recv_date_table(recv_date_spreadsheet, recv_date_worksheet)
+    # assigning spread sheet location
+    main_spreadsheet = r"test_data/main_spreadsheet.xlsx"
+    main_worksheet = "Sheet1"
+    ship_date_spreadsheet = r"test_data/ship_date_spreadsheet.xlsx"
+    ship_date_worksheet = "Sheet1"
+    total_shipment_spreadsheet = r"test_data/total_shipment_spreadsheet.xlsx"
+    total_shipment_worksheet = "Sheet1"
 
+    # upload spreadsheets
+    upload_main_table(main_spreadsheet, main_worksheet)
+    update_ship_date_table(ship_date_spreadsheet, ship_date_worksheet)
+    upload_total_shippment_table(total_shipment_spreadsheet, total_shipment_worksheet)
+
+    # not needed, for debug only.
     database.query("""SELECT * FROM main_table;""")
     read_mysql_result()
 
+    # finish up database.
     database.commit()
     database.close()
 
+    # connect to database using mysql connector for easy processing.
     database = mysql.connector.connect(host='localhost', user='root', passwd='NewPass123!', db='mysqlPython', auth_plugin='mysql_native_password')
     cursor = database.cursor()
+
     df = pd.read_sql("SELECT * FROM main_table", con=database)
+    # read database into panda data frame for plotting purposes.
     df = pd.read_sql("SELECT COUNT(*) as Counts, prod_type_corrected as Products FROM main_table GROUP BY prod_type_corrected", con=database)
-    #following are plotting examples:
     df.set_index('Products', inplace=True)
     df.sort_values(by=['Counts'], ascending=False, inplace=True)
     df.plot.bar()
